@@ -4,6 +4,7 @@ import pandas as pd
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
+from xgboost import XGBClassifier
 from sklearn.metrics import roc_auc_score, average_precision_score, f1_score, precision_score, recall_score
 from imblearn.over_sampling import SMOTE
 from imblearn.pipeline import Pipeline as ImbPipeline
@@ -23,6 +24,19 @@ def _make_pipelines() -> dict:
             ("scaler", StandardScaler()),
             ("smote", SMOTE(random_state=SMOTE_RANDOM_STATE)),
             ("clf", LogisticRegression(max_iter=1000, random_state=42)),
+        ]),
+        "xgboost": ImbPipeline([
+            ("smote", SMOTE(random_state=SMOTE_RANDOM_STATE)),
+            ("clf", XGBClassifier(
+                n_estimators=300,
+                max_depth=4,
+                learning_rate=0.05,
+                subsample=0.8,
+                colsample_bytree=0.8,
+                eval_metric="logloss",
+                random_state=42,
+                verbosity=0,
+            )),
         ]),
     }
 

@@ -6,7 +6,11 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import IsolationForest
 from xgboost import XGBClassifier
-from sklearn.metrics import roc_auc_score, average_precision_score, f1_score, precision_score, recall_score
+from sklearn.metrics import (
+    roc_auc_score, average_precision_score, f1_score,
+    precision_score, recall_score,
+    roc_curve, precision_recall_curve, confusion_matrix,
+)
 from imblearn.over_sampling import SMOTE
 from imblearn.pipeline import Pipeline as ImbPipeline
 
@@ -153,6 +157,48 @@ def predict_proba(artifact: dict, df: pd.DataFrame) -> np.ndarray:
     """Return crash probabilities for every row in df."""
     X = df[artifact["feature_cols"]].values
     return artifact["model"].predict_proba(X)[:, 1]
+
+
+def get_evaluation_curves(df: pd.DataFrame, model_name: str = "xgboost") -> dict:
+    """
+    Run TimeSeriesSplit CV for one model and return pooled ROC/PR curve data
+    plus the confusion matrix at the default threshold.
+
+    Pools all out-of-fold predictions so curves reflect the full time range.
+    """
+    feature_cols = get_feature_cols(df)
+    X = df[feature_cols].values
+    y = df["crash"].values
+    tscv = TimeSeriesSplit(n_splits=N_SPLITS)
+    pipelines = _make_pipelines()
+    pipe = pipelines[model_name]
+
+    all_proba = []
+    all_true = []
+    for train_idx, val_idx in tscv.split(X):
+        X_tr, X_val = X[train_idx], X[val_idx]
+        y_tr, y_val = y[train_idx], y[val_idx]
+        if y_tr.sum() < 5:
+            continue
+        pipe.fit(X_tr, y_tr)
+        all_proba.extend(pipe.predict_proba(X_val)[:, 1])
+        all_true.extend(y_val)
+
+    all_proba = np.array(all_proba)
+    all_true = np.array(all_true)
+
+    fpr, tpr, _ = roc_curve(all_true, all_proba)
+    prec, rec, _ = precision_recall_curve(all_true, all_proba)
+    preds = (all_proba >= THRESHOLD).astype(int)
+    cm = confusion_matrix(all_true, preds)
+
+    return {
+        "fpr": fpr, "tpr": tpr,
+        "precision": prec, "recall": rec,
+        "confusion_matrix": cm,
+        "roc_auc": roc_auc_score(all_true, all_proba),
+        "avg_precision": average_precision_score(all_true, all_proba),
+    }
 
 
 def get_feature_importance(artifact: dict) -> pd.Series | None:

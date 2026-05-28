@@ -8,20 +8,30 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
+import plotly.figure_factory as ff
 import streamlit as st
 from dotenv import load_dotenv
 
 load_dotenv()
 
-from src.data.loader import load_market_data
-from src.data.features import prepare_ml_dataset
-from src.data.eda import class_balance
-from src.models.train import load_model, predict_proba, get_feature_importance, cross_validate_models, THRESHOLD
-from src.data.eda import crash_frequency_by_year
-from src.strategy.backtest import run_backtest, compute_metrics, format_metrics, drawdown_series
+from src.data.loader import load_market_data, refresh_data
+from src.data.features import prepare_ml_dataset, get_feature_cols
+from src.data.eda import class_balance, crash_frequency_by_year, feature_correlation
+from src.models.train import (
+    load_model, predict_proba, get_feature_importance,
+    cross_validate_models, get_evaluation_curves, THRESHOLD,
+)
+from src.strategy.backtest import (
+    run_backtest, compute_metrics, format_metrics,
+    drawdown_series, monthly_returns,
+)
 
 st.set_page_config(page_title="Market Anomaly Detector", page_icon="📉", layout="wide")
 
+
+# ---------------------------------------------------------------------------
+# Cached loaders
+# ---------------------------------------------------------------------------
 
 @st.cache_data(show_spinner="Downloading market data…")
 def get_raw_data():
@@ -46,31 +56,68 @@ def get_predictions(_df, _artifact):
     return predict_proba(_artifact, _df)
 
 
+@st.cache_data(show_spinner="Running backtest…")
+def _get_backtest(_df, _probs, threshold):
+    return run_backtest(_df, _probs, threshold=threshold)
+
+
+@st.cache_data(show_spinner="Running cross-validation (may take ~60s)…")
+def _get_cv_results(_df):
+    return cross_validate_models(_df)
+
+
+@st.cache_data(show_spinner="Computing ROC/PR curves…")
+def _get_eval_curves(_df):
+    return get_evaluation_curves(_df, model_name="xgboost")
+
+
+# ---------------------------------------------------------------------------
+# Sidebar
+# ---------------------------------------------------------------------------
+
 def render_sidebar(df, artifact):
     with st.sidebar:
         st.title("📉 Anomaly Detector")
         st.caption("S&P 500 Market Crash Early Warning")
+
         st.divider()
         st.subheader("Data")
         st.metric("Trading Days", f"{len(df):,}")
+        st.caption(
+            f"{df.index[0].strftime('%Y-%m-%d')} → {df.index[-1].strftime('%Y-%m-%d')}"
+        )
         bal = class_balance(df)
-        st.metric("Crash Rate (hist.)", f"{bal['crash_rate']:.1%}")
+        st.metric("Historical Crash Rate", f"{bal['crash_rate']:.1%}")
+
+        if st.button("🔄 Refresh data", use_container_width=True):
+            refresh_data()
+            st.cache_data.clear()
+            st.rerun()
+
         st.divider()
         st.subheader("Model")
         if artifact:
             st.success(f"Loaded: **{artifact['model_type']}**")
+            st.caption(f"Default threshold: {artifact['threshold']:.0%}")
         else:
             st.error("No trained model found.")
             st.info("Run `python train_model.py` first.")
+
         st.divider()
         threshold = st.slider(
             "Crash probability threshold",
             min_value=0.10, max_value=0.70,
             value=float(artifact["threshold"]) if artifact else 0.35,
             step=0.05,
+            help="Go to cash when crash probability is above this level.",
         )
+
     return threshold
 
+
+# ---------------------------------------------------------------------------
+# Tab 1: Overview
+# ---------------------------------------------------------------------------
 
 def _gauge(value: float, title: str) -> go.Figure:
     color = "#e63946" if value >= 0.5 else "#f4a261" if value >= 0.3 else "#2a9d8f"
@@ -93,102 +140,6 @@ def _gauge(value: float, title: str) -> go.Figure:
     return fig
 
 
-@st.cache_data(show_spinner="Running backtest…")
-def _get_backtest(_df, _probs, threshold):
-    return run_backtest(_df, _probs, threshold=threshold)
-
-
-def _tab_strategy(df, probs, threshold):
-    bt = _get_backtest(df, probs, threshold)
-    metrics = compute_metrics(bt)
-    fmt = format_metrics(metrics)
-
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Strategy CAGR", f"{metrics['Strategy CAGR']:.1%}",
-                delta=f"{metrics['CAGR Improvement']:+.1%} vs buy-and-hold")
-    col2.metric("Strategy Sharpe", f"{metrics['Strategy Sharpe']:.2f}",
-                delta=f"{metrics['Strategy Sharpe'] - metrics['Market Sharpe']:+.2f}")
-    col3.metric("Strategy Max Drawdown", f"{metrics['Strategy Max Drawdown']:.1%}",
-                delta=f"{metrics['Strategy Max Drawdown'] - metrics['Market Max Drawdown']:+.1%}",
-                delta_color="inverse")
-    col4.metric("Days in Cash", f"{metrics['Days in Cash (Signals)']:,}",
-                delta=f"{metrics['% Days in Cash']:.1%} of all days")
-
-    st.divider()
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=bt.index, y=bt["market_cumret"], mode="lines",
-                             name="Buy & Hold", line=dict(color="#1d3557", width=2)))
-    fig.add_trace(go.Scatter(x=bt.index, y=bt["strategy_cumret"], mode="lines",
-                             name="Model Strategy", line=dict(color="#2a9d8f", width=2)))
-    fig.update_layout(title="Cumulative Returns: Strategy vs Buy & Hold",
-                      xaxis_title="Date", yaxis_title="Portfolio Value (start = 1.0)",
-                      height=420, legend=dict(orientation="h", y=-0.15), margin=dict(t=50, b=60))
-    st.plotly_chart(fig, use_container_width=True)
-
-    mkt_dd = drawdown_series(bt["market_cumret"])
-    strat_dd = drawdown_series(bt["strategy_cumret"])
-    fig2 = go.Figure()
-    fig2.add_trace(go.Scatter(x=bt.index, y=mkt_dd, mode="lines",
-                              name="Buy & Hold Drawdown", line=dict(color="#e63946", width=1.5),
-                              fill="tozeroy", fillcolor="rgba(230,57,70,0.1)"))
-    fig2.add_trace(go.Scatter(x=bt.index, y=strat_dd, mode="lines",
-                              name="Strategy Drawdown", line=dict(color="#2a9d8f", width=1.5),
-                              fill="tozeroy", fillcolor="rgba(42,157,143,0.1)"))
-    fig2.update_layout(title="Drawdown Comparison", yaxis=dict(tickformat=".0%"),
-                       height=300, legend=dict(orientation="h", y=-0.2), margin=dict(t=50, b=60))
-    st.plotly_chart(fig2, use_container_width=True)
-
-    st.subheader("Full Performance Metrics")
-    st.dataframe(fmt, use_container_width=True)
-
-
-@st.cache_data(show_spinner="Running cross-validation (may take ~60s)…")
-def _get_cv_results(_df):
-    return cross_validate_models(_df)
-
-
-def _tab_model_performance(df, artifact):
-    if artifact is None:
-        st.warning("Train the model first: `python train_model.py`")
-        return
-
-    st.subheader("Cross-Validation Results (5-fold TimeSeriesSplit)")
-    st.caption("SMOTE applied only inside training folds — no data leakage.")
-
-    cv = _get_cv_results(df)
-    display = cv.copy()
-    for col in display.columns:
-        if display[col].dtype == float:
-            display[col] = display[col].apply(lambda x: f"{x:.4f}" if pd.notna(x) else "—")
-    st.dataframe(display, use_container_width=True)
-    st.divider()
-
-    col_a, col_b = st.columns(2)
-    with col_a:
-        st.subheader("XGBoost Feature Importance")
-        fi = get_feature_importance(artifact)
-        if fi is not None:
-            fig = px.bar(x=fi.values, y=fi.index, orientation="h",
-                         labels={"x": "Importance", "y": "Feature"},
-                         color=fi.values, color_continuous_scale="Blues")
-            fig.update_layout(height=450, showlegend=False, margin=dict(t=20))
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("Feature importance not available for this model type.")
-
-    with col_b:
-        st.subheader("Crash Days per Year")
-        freq = crash_frequency_by_year(df)
-        fig2 = px.bar(x=freq.index, y=freq.values,
-                      labels={"x": "Year", "y": "Crash Days"},
-                      color=freq.values, color_continuous_scale="Reds")
-        fig2.update_layout(height=450, showlegend=False, margin=dict(t=20))
-        st.plotly_chart(fig2, use_container_width=True)
-
-    st.info("**ROC-AUC** measures overall discrimination. "
-            "**Average Precision** (PR-AUC) is more informative for imbalanced classes.")
-
-
 def _tab_overview(df, artifact, probs, threshold):
     if artifact is None:
         st.warning("Train the model first: `python train_model.py`")
@@ -204,6 +155,7 @@ def _tab_overview(df, artifact, probs, threshold):
 
     col1, col2, col3, col4, col5 = st.columns(5)
     col1.plotly_chart(_gauge(latest_prob, "Crash Probability"), use_container_width=True)
+
     with col2:
         st.metric("S&P 500 Close", f"${latest['Close']:,.0f}")
         st.metric("Today's Return", f"{latest['return_1d']:.2%}")
@@ -253,6 +205,219 @@ def _tab_overview(df, artifact, probs, threshold):
                        yaxis=dict(range=[0, 1]), height=280, margin=dict(t=50, b=40))
     st.plotly_chart(fig2, use_container_width=True)
 
+
+# ---------------------------------------------------------------------------
+# Tab 2: Model Performance
+# ---------------------------------------------------------------------------
+
+def _tab_model_performance(df, artifact):
+    if artifact is None:
+        st.warning("Train the model first: `python train_model.py`")
+        return
+
+    # --- CV results table ---
+    st.subheader("Cross-Validation Results (5-fold TimeSeriesSplit)")
+    st.caption("SMOTE applied only inside training folds — no data leakage.")
+    cv = _get_cv_results(df)
+    display = cv.copy()
+    for col in display.columns:
+        if display[col].dtype == float:
+            display[col] = display[col].apply(lambda x: f"{x:.4f}" if pd.notna(x) else "—")
+    st.dataframe(display, use_container_width=True)
+
+    st.divider()
+
+    # --- ROC curve + PR curve ---
+    st.subheader("XGBoost Out-of-Fold Evaluation Curves")
+    curves = _get_eval_curves(df)
+
+    col_roc, col_pr = st.columns(2)
+
+    with col_roc:
+        fig_roc = go.Figure()
+        fig_roc.add_trace(go.Scatter(
+            x=curves["fpr"], y=curves["tpr"], mode="lines",
+            name=f"ROC (AUC = {curves['roc_auc']:.3f})",
+            line=dict(color="#1d3557", width=2),
+        ))
+        fig_roc.add_trace(go.Scatter(
+            x=[0, 1], y=[0, 1], mode="lines",
+            name="Random", line=dict(color="grey", dash="dash", width=1),
+        ))
+        fig_roc.update_layout(
+            title="ROC Curve", xaxis_title="False Positive Rate",
+            yaxis_title="True Positive Rate", height=380,
+            legend=dict(x=0.6, y=0.1),
+        )
+        st.plotly_chart(fig_roc, use_container_width=True)
+
+    with col_pr:
+        fig_pr = go.Figure()
+        fig_pr.add_trace(go.Scatter(
+            x=curves["recall"], y=curves["precision"], mode="lines",
+            name=f"PR (AP = {curves['avg_precision']:.3f})",
+            line=dict(color="#2a9d8f", width=2),
+        ))
+        crash_rate = float(df["crash"].mean())
+        fig_pr.add_hline(y=crash_rate, line_dash="dash", line_color="grey",
+                         annotation_text=f"Baseline ({crash_rate:.1%})")
+        fig_pr.update_layout(
+            title="Precision-Recall Curve", xaxis_title="Recall",
+            yaxis_title="Precision", height=380,
+            legend=dict(x=0.4, y=0.9),
+        )
+        st.plotly_chart(fig_pr, use_container_width=True)
+
+    st.divider()
+
+    # --- Confusion matrix + feature importance ---
+    col_cm, col_fi = st.columns(2)
+
+    with col_cm:
+        st.subheader(f"Confusion Matrix (threshold = {THRESHOLD:.0%})")
+        cm = curves["confusion_matrix"]
+        labels = ["Normal", "Crash"]
+        fig_cm = ff.create_annotated_heatmap(
+            z=cm, x=labels, y=labels,
+            annotation_text=cm.astype(str),
+            colorscale="Blues", showscale=False,
+        )
+        fig_cm.update_layout(
+            xaxis_title="Predicted", yaxis_title="Actual",
+            height=350, margin=dict(t=50),
+        )
+        fig_cm["layout"]["yaxis"]["autorange"] = "reversed"
+        st.plotly_chart(fig_cm, use_container_width=True)
+
+    with col_fi:
+        st.subheader("Feature Importance")
+        fi = get_feature_importance(artifact)
+        if fi is not None:
+            fig_fi = px.bar(x=fi.values, y=fi.index, orientation="h",
+                            labels={"x": "Importance", "y": "Feature"},
+                            color=fi.values, color_continuous_scale="Blues")
+            fig_fi.update_layout(height=350, showlegend=False, margin=dict(t=20))
+            st.plotly_chart(fig_fi, use_container_width=True)
+        else:
+            st.info("Feature importance not available for this model type.")
+
+    st.divider()
+
+    # --- Feature correlation heatmap ---
+    st.subheader("Feature Correlation Matrix")
+    feat_cols = get_feature_cols(df)
+    corr = feature_correlation(df, feat_cols)
+    fig_corr = px.imshow(
+        corr, text_auto=".2f", color_continuous_scale="RdBu_r",
+        zmin=-1, zmax=1, aspect="auto",
+    )
+    fig_corr.update_layout(height=550, margin=dict(t=30))
+    st.plotly_chart(fig_corr, use_container_width=True)
+
+    st.divider()
+
+    # --- Crash days per year ---
+    col_freq, col_note = st.columns([2, 1])
+    with col_freq:
+        st.subheader("Crash Days per Year")
+        freq = crash_frequency_by_year(df)
+        fig_freq = px.bar(x=freq.index, y=freq.values,
+                          labels={"x": "Year", "y": "Crash Days"},
+                          color=freq.values, color_continuous_scale="Reds")
+        fig_freq.update_layout(height=300, showlegend=False, margin=dict(t=20))
+        st.plotly_chart(fig_freq, use_container_width=True)
+    with col_note:
+        st.info(
+            "**ROC-AUC** measures overall discrimination.\n\n"
+            "**Average Precision** (PR-AUC) is more informative for imbalanced classes — "
+            "it penalises false positives on the rare crash class.\n\n"
+            "**Confusion matrix** shows predicted vs actual at the chosen threshold."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Tab 3: Strategy Backtest
+# ---------------------------------------------------------------------------
+
+def _tab_strategy(df, probs, threshold):
+    bt = _get_backtest(df, probs, threshold)
+    metrics = compute_metrics(bt)
+    fmt = format_metrics(metrics)
+
+    # Headline KPIs
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Strategy CAGR", f"{metrics['Strategy CAGR']:.1%}",
+                delta=f"{metrics['CAGR Improvement']:+.1%} vs buy-and-hold")
+    col2.metric("Strategy Sharpe", f"{metrics['Strategy Sharpe']:.2f}",
+                delta=f"{metrics['Strategy Sharpe'] - metrics['Market Sharpe']:+.2f}")
+    col3.metric("Strategy Max Drawdown", f"{metrics['Strategy Max Drawdown']:.1%}",
+                delta=f"{metrics['Strategy Max Drawdown'] - metrics['Market Max Drawdown']:+.1%}",
+                delta_color="inverse")
+    col4.metric("Strategy Sortino", f"{metrics['Strategy Sortino']:.2f}",
+                delta=f"{metrics['Strategy Sortino'] - metrics['Market Sortino']:+.2f}")
+
+    st.divider()
+
+    # Cumulative returns
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=bt.index, y=bt["market_cumret"], mode="lines",
+                             name="Buy & Hold", line=dict(color="#1d3557", width=2)))
+    fig.add_trace(go.Scatter(x=bt.index, y=bt["strategy_cumret"], mode="lines",
+                             name="Model Strategy", line=dict(color="#2a9d8f", width=2)))
+    fig.update_layout(title="Cumulative Returns: Strategy vs Buy & Hold",
+                      xaxis_title="Date", yaxis_title="Portfolio Value (start = 1.0)",
+                      height=420, legend=dict(orientation="h", y=-0.15), margin=dict(t=50, b=60))
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Drawdown chart
+    mkt_dd = drawdown_series(bt["market_cumret"])
+    strat_dd = drawdown_series(bt["strategy_cumret"])
+    fig2 = go.Figure()
+    fig2.add_trace(go.Scatter(x=bt.index, y=mkt_dd, mode="lines",
+                              name="Buy & Hold Drawdown", line=dict(color="#e63946", width=1.5),
+                              fill="tozeroy", fillcolor="rgba(230,57,70,0.1)"))
+    fig2.add_trace(go.Scatter(x=bt.index, y=strat_dd, mode="lines",
+                              name="Strategy Drawdown", line=dict(color="#2a9d8f", width=1.5),
+                              fill="tozeroy", fillcolor="rgba(42,157,143,0.1)"))
+    fig2.update_layout(title="Drawdown Comparison", yaxis=dict(tickformat=".0%"),
+                       height=300, legend=dict(orientation="h", y=-0.2), margin=dict(t=50, b=60))
+    st.plotly_chart(fig2, use_container_width=True)
+
+    st.divider()
+
+    # Monthly returns heatmaps
+    st.subheader("Monthly Returns Heatmap")
+    col_mkt_h, col_strat_h = st.columns(2)
+
+    for col, ret_series, label in [
+        (col_mkt_h, bt["market_return"], "Buy & Hold"),
+        (col_strat_h, bt["strategy_return"], "Model Strategy"),
+    ]:
+        with col:
+            st.caption(label)
+            mr = monthly_returns(ret_series.dropna())
+            # Keep only last 10 years for readability
+            mr = mr.iloc[-10:]
+            fig_h = px.imshow(
+                mr * 100,
+                color_continuous_scale="RdYlGn",
+                color_continuous_midpoint=0,
+                zmin=-10, zmax=10,
+                text_auto=".1f",
+                labels={"color": "Return (%)"},
+                aspect="auto",
+            )
+            fig_h.update_layout(height=350, margin=dict(t=20))
+            st.plotly_chart(fig_h, use_container_width=True)
+
+    st.divider()
+    st.subheader("Full Performance Metrics")
+    st.dataframe(fmt, use_container_width=True)
+
+
+# ---------------------------------------------------------------------------
+# Tab 4: AI Assistant
+# ---------------------------------------------------------------------------
 
 def _build_system_prompt(df, artifact, probs, threshold) -> str:
     latest = df.iloc[-1]
@@ -364,6 +529,10 @@ def _tab_ai_assistant(df, artifact, probs, threshold):
             st.session_state.messages = []
             st.rerun()
 
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 def main():
     raw = get_raw_data()

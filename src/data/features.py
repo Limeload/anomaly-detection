@@ -8,6 +8,8 @@ FEATURE_COLS = [
     "vol_5d", "vol_21d", "vol_63d",
     "rsi_14",
     "macd", "macd_signal", "macd_hist",
+    "bb_width", "bb_pos",
+    "price_sma50_ratio", "price_sma200_ratio",
 ]
 
 
@@ -40,6 +42,14 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     data["macd"] = ema12 - ema26
     data["macd_signal"] = data["macd"].ewm(span=9).mean()
     data["macd_hist"] = data["macd"] - data["macd_signal"]
+
+    sma20 = close.rolling(20).mean()
+    std20 = close.rolling(20).std()
+    data["bb_width"] = (2 * std20) / sma20
+    data["bb_pos"] = (close - (sma20 - 2 * std20)) / (4 * std20 + 1e-9)
+
+    data["price_sma50_ratio"] = close / close.rolling(50).mean() - 1
+    data["price_sma200_ratio"] = close / close.rolling(200).mean() - 1
 
     data["return_next"] = data["return_1d"].shift(-1)
     data["crash"] = (data["return_next"] < CRASH_THRESHOLD).astype(int)

@@ -138,3 +138,18 @@ def train_final_model(df: pd.DataFrame, model_type: str = "xgboost") -> dict:
     joblib.dump(artifact, ARTIFACT_PATH)
     print(f"Saved model artifact → {ARTIFACT_PATH}")
     return artifact
+
+
+def load_model() -> dict:
+    """Load saved artifact. Raises FileNotFoundError if not trained yet."""
+    if not ARTIFACT_PATH.exists():
+        raise FileNotFoundError(
+            f"No trained model at {ARTIFACT_PATH}. Run `python train_model.py` first."
+        )
+    return joblib.load(ARTIFACT_PATH)
+
+
+def predict_proba(artifact: dict, df: pd.DataFrame) -> np.ndarray:
+    """Return crash probabilities for every row in df."""
+    X = df[artifact["feature_cols"]].values
+    return artifact["model"].predict_proba(X)[:, 1]

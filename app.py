@@ -254,6 +254,117 @@ def _tab_overview(df, artifact, probs, threshold):
     st.plotly_chart(fig2, use_container_width=True)
 
 
+def _build_system_prompt(df, artifact, probs, threshold) -> str:
+    latest = df.iloc[-1]
+    latest_prob = float(probs[-1])
+    signal = "CRASH WARNING" if latest_prob >= threshold else "NORMAL CONDITIONS"
+    recent_probs = "\n".join(
+        f"  {d.strftime('%Y-%m-%d')}: {p:.1%}"
+        for d, p in zip(df.index[-5:], probs[-5:])
+    )
+    return f"""You are an expert financial risk analyst embedded in a market anomaly detection system.
+You have real-time access to a trained XGBoost crash detection model analysing S&P 500 data.
+
+=== CURRENT MODEL STATE ===
+Date: {df.index[-1].strftime('%A, %B %d, %Y')}
+Crash Probability: {latest_prob:.1%}
+Signal: {signal}
+Decision Threshold: {threshold:.0%}
+
+=== KEY MARKET INDICATORS (latest) ===
+S&P 500 Close:   ${latest['Close']:,.2f}
+Today's Return:  {latest.get('return_1d', float('nan')):.2%}
+5-Day Return:    {latest.get('return_5d', float('nan')):.2%}
+VIX:             {latest.get('VIX', float('nan')):.2f}
+21d Volatility:  {latest.get('vol_21d', float('nan')):.1%} (annualised)
+RSI (14):        {latest.get('rsi_14', float('nan')):.1f}
+MACD Histogram:  {latest.get('macd_hist', float('nan')):.4f}
+SMA200 Distance: {latest.get('price_sma200_ratio', float('nan')):.2%}
+
+=== RECENT CRASH PROBABILITIES ===
+{recent_probs}
+
+=== STRATEGY RECOMMENDATION ===
+{"REDUCE EQUITY EXPOSURE — move to cash or defensive assets." if latest_prob >= threshold else "MAINTAIN POSITIONS — conditions appear normal. Monitor VIX for changes."}
+
+Use these specific numbers in your answers. Do not fabricate data or give personalised investment advice.
+"""
+
+
+def _tab_ai_assistant(df, artifact, probs, threshold):
+    st.subheader("AI Market Analyst")
+    st.caption("Ask about the current signal, market conditions, or how the strategy works.")
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        st.error("**ANTHROPIC_API_KEY not found.** Set it in a `.env` file to enable the AI assistant.")
+        st.code("ANTHROPIC_API_KEY=sk-ant-...")
+        return
+
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=api_key)
+    except ImportError:
+        st.error("Install the anthropic package: `pip install anthropic`")
+        return
+
+    system_prompt = _build_system_prompt(df, artifact, probs, threshold)
+    latest_prob = float(probs[-1])
+    signal_color = "red" if latest_prob >= threshold else "green"
+    signal_text = "CRASH WARNING" if latest_prob >= threshold else "LOW RISK"
+    st.markdown(
+        f"**Live Context:** Crash probability = **{latest_prob:.1%}** · "
+        f"Signal: :{signal_color}[**{signal_text}**]"
+    )
+
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    if not st.session_state.messages:
+        st.markdown("**Try asking:**")
+        cols = st.columns(3)
+        starters = [
+            "What is the current crash signal and why?",
+            "How does the trading strategy work?",
+            "Which indicators are driving the risk level?",
+        ]
+        for col, q in zip(cols, starters):
+            if col.button(q, use_container_width=True):
+                st.session_state.messages.append({"role": "user", "content": q})
+                st.rerun()
+
+    if user_input := st.chat_input("Ask about the market signal or strategy…"):
+        st.session_state.messages.append({"role": "user", "content": user_input})
+        with st.chat_message("user"):
+            st.markdown(user_input)
+
+    if st.session_state.messages and st.session_state.messages[-1]["role"] == "user":
+        with st.chat_message("assistant"):
+            placeholder = st.empty()
+            full_response = ""
+            with client.messages.stream(
+                model="claude-sonnet-4-6",
+                max_tokens=1024,
+                system=system_prompt,
+                messages=[{"role": m["role"], "content": m["content"]}
+                          for m in st.session_state.messages],
+            ) as stream:
+                for text in stream.text_stream:
+                    full_response += text
+                    placeholder.markdown(full_response + "▌")
+            placeholder.markdown(full_response)
+        st.session_state.messages.append({"role": "assistant", "content": full_response})
+
+    if st.session_state.messages:
+        if st.button("Clear conversation", type="secondary"):
+            st.session_state.messages = []
+            st.rerun()
+
+
 def main():
     raw = get_raw_data()
     df = get_ml_dataset(raw)
@@ -276,7 +387,10 @@ def main():
         else:
             st.warning("Train the model first: `python train_model.py`")
     with tab4:
-        st.info("AI Assistant tab — coming soon")
+        if probs is not None:
+            _tab_ai_assistant(df, artifact, probs, threshold)
+        else:
+            st.warning("Train the model first: `python train_model.py`")
 
 
 if __name__ == "__main__":

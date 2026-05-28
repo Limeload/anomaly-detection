@@ -16,7 +16,8 @@ load_dotenv()
 from src.data.loader import load_market_data
 from src.data.features import prepare_ml_dataset
 from src.data.eda import class_balance
-from src.models.train import load_model, predict_proba, THRESHOLD
+from src.models.train import load_model, predict_proba, get_feature_importance, cross_validate_models, THRESHOLD
+from src.data.eda import crash_frequency_by_year
 
 st.set_page_config(page_title="Market Anomaly Detector", page_icon="📉", layout="wide")
 
@@ -89,6 +90,53 @@ def _gauge(value: float, title: str) -> go.Figure:
     ))
     fig.update_layout(height=250, margin=dict(t=40, b=10, l=20, r=20))
     return fig
+
+
+@st.cache_data(show_spinner="Running cross-validation (may take ~60s)…")
+def _get_cv_results(_df):
+    return cross_validate_models(_df)
+
+
+def _tab_model_performance(df, artifact):
+    if artifact is None:
+        st.warning("Train the model first: `python train_model.py`")
+        return
+
+    st.subheader("Cross-Validation Results (5-fold TimeSeriesSplit)")
+    st.caption("SMOTE applied only inside training folds — no data leakage.")
+
+    cv = _get_cv_results(df)
+    display = cv.copy()
+    for col in display.columns:
+        if display[col].dtype == float:
+            display[col] = display[col].apply(lambda x: f"{x:.4f}" if pd.notna(x) else "—")
+    st.dataframe(display, use_container_width=True)
+    st.divider()
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.subheader("XGBoost Feature Importance")
+        fi = get_feature_importance(artifact)
+        if fi is not None:
+            fig = px.bar(x=fi.values, y=fi.index, orientation="h",
+                         labels={"x": "Importance", "y": "Feature"},
+                         color=fi.values, color_continuous_scale="Blues")
+            fig.update_layout(height=450, showlegend=False, margin=dict(t=20))
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Feature importance not available for this model type.")
+
+    with col_b:
+        st.subheader("Crash Days per Year")
+        freq = crash_frequency_by_year(df)
+        fig2 = px.bar(x=freq.index, y=freq.values,
+                      labels={"x": "Year", "y": "Crash Days"},
+                      color=freq.values, color_continuous_scale="Reds")
+        fig2.update_layout(height=450, showlegend=False, margin=dict(t=20))
+        st.plotly_chart(fig2, use_container_width=True)
+
+    st.info("**ROC-AUC** measures overall discrimination. "
+            "**Average Precision** (PR-AUC) is more informative for imbalanced classes.")
 
 
 def _tab_overview(df, artifact, probs, threshold):
@@ -171,7 +219,7 @@ def main():
     with tab1:
         _tab_overview(df, artifact, probs, threshold)
     with tab2:
-        st.info("Model Performance tab — coming soon")
+        _tab_model_performance(df, artifact)
     with tab3:
         st.info("Strategy Backtest tab — coming soon")
     with tab4:

@@ -22,3 +22,11 @@ def run_backtest(df: pd.DataFrame, crash_probs: np.ndarray, threshold: float = 0
     bt["market_cumret"] = (1 + bt["market_return"]).cumprod()
     bt["strategy_cumret"] = (1 + bt["strategy_return"]).cumprod()
     return bt.dropna(subset=["market_return"])
+
+
+def sharpe_ratio(returns: pd.Series) -> float:
+    """Annualised Sharpe ratio using daily returns."""
+    excess = returns - RISK_FREE_DAILY
+    if excess.std() == 0:
+        return 0.0
+    return float(np.sqrt(252) * excess.mean() / excess.std())

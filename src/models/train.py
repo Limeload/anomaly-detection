@@ -153,3 +153,13 @@ def predict_proba(artifact: dict, df: pd.DataFrame) -> np.ndarray:
     """Return crash probabilities for every row in df."""
     X = df[artifact["feature_cols"]].values
     return artifact["model"].predict_proba(X)[:, 1]
+
+
+def get_feature_importance(artifact: dict) -> pd.Series | None:
+    """XGBoost feature importances sorted descending. None for other model types."""
+    model = artifact["model"]
+    feature_cols = artifact["feature_cols"]
+    clf = model.named_steps.get("clf", model) if hasattr(model, "named_steps") else model
+    if hasattr(clf, "feature_importances_"):
+        return pd.Series(clf.feature_importances_, index=feature_cols).sort_values(ascending=False)
+    return None

@@ -18,6 +18,7 @@ from src.data.features import prepare_ml_dataset
 from src.data.eda import class_balance
 from src.models.train import load_model, predict_proba, get_feature_importance, cross_validate_models, THRESHOLD
 from src.data.eda import crash_frequency_by_year
+from src.strategy.backtest import run_backtest, compute_metrics, format_metrics, drawdown_series
 
 st.set_page_config(page_title="Market Anomaly Detector", page_icon="📉", layout="wide")
 
@@ -90,6 +91,55 @@ def _gauge(value: float, title: str) -> go.Figure:
     ))
     fig.update_layout(height=250, margin=dict(t=40, b=10, l=20, r=20))
     return fig
+
+
+@st.cache_data(show_spinner="Running backtest…")
+def _get_backtest(_df, _probs, threshold):
+    return run_backtest(_df, _probs, threshold=threshold)
+
+
+def _tab_strategy(df, probs, threshold):
+    bt = _get_backtest(df, probs, threshold)
+    metrics = compute_metrics(bt)
+    fmt = format_metrics(metrics)
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Strategy CAGR", f"{metrics['Strategy CAGR']:.1%}",
+                delta=f"{metrics['CAGR Improvement']:+.1%} vs buy-and-hold")
+    col2.metric("Strategy Sharpe", f"{metrics['Strategy Sharpe']:.2f}",
+                delta=f"{metrics['Strategy Sharpe'] - metrics['Market Sharpe']:+.2f}")
+    col3.metric("Strategy Max Drawdown", f"{metrics['Strategy Max Drawdown']:.1%}",
+                delta=f"{metrics['Strategy Max Drawdown'] - metrics['Market Max Drawdown']:+.1%}",
+                delta_color="inverse")
+    col4.metric("Days in Cash", f"{metrics['Days in Cash (Signals)']:,}",
+                delta=f"{metrics['% Days in Cash']:.1%} of all days")
+
+    st.divider()
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=bt.index, y=bt["market_cumret"], mode="lines",
+                             name="Buy & Hold", line=dict(color="#1d3557", width=2)))
+    fig.add_trace(go.Scatter(x=bt.index, y=bt["strategy_cumret"], mode="lines",
+                             name="Model Strategy", line=dict(color="#2a9d8f", width=2)))
+    fig.update_layout(title="Cumulative Returns: Strategy vs Buy & Hold",
+                      xaxis_title="Date", yaxis_title="Portfolio Value (start = 1.0)",
+                      height=420, legend=dict(orientation="h", y=-0.15), margin=dict(t=50, b=60))
+    st.plotly_chart(fig, use_container_width=True)
+
+    mkt_dd = drawdown_series(bt["market_cumret"])
+    strat_dd = drawdown_series(bt["strategy_cumret"])
+    fig2 = go.Figure()
+    fig2.add_trace(go.Scatter(x=bt.index, y=mkt_dd, mode="lines",
+                              name="Buy & Hold Drawdown", line=dict(color="#e63946", width=1.5),
+                              fill="tozeroy", fillcolor="rgba(230,57,70,0.1)"))
+    fig2.add_trace(go.Scatter(x=bt.index, y=strat_dd, mode="lines",
+                              name="Strategy Drawdown", line=dict(color="#2a9d8f", width=1.5),
+                              fill="tozeroy", fillcolor="rgba(42,157,143,0.1)"))
+    fig2.update_layout(title="Drawdown Comparison", yaxis=dict(tickformat=".0%"),
+                       height=300, legend=dict(orientation="h", y=-0.2), margin=dict(t=50, b=60))
+    st.plotly_chart(fig2, use_container_width=True)
+
+    st.subheader("Full Performance Metrics")
+    st.dataframe(fmt, use_container_width=True)
 
 
 @st.cache_data(show_spinner="Running cross-validation (may take ~60s)…")
@@ -221,7 +271,10 @@ def main():
     with tab2:
         _tab_model_performance(df, artifact)
     with tab3:
-        st.info("Strategy Backtest tab — coming soon")
+        if probs is not None:
+            _tab_strategy(df, probs, threshold)
+        else:
+            st.warning("Train the model first: `python train_model.py`")
     with tab4:
         st.info("AI Assistant tab — coming soon")
 

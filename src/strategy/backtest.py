@@ -30,3 +30,25 @@ def sharpe_ratio(returns: pd.Series) -> float:
     if excess.std() == 0:
         return 0.0
     return float(np.sqrt(252) * excess.mean() / excess.std())
+
+
+def max_drawdown(cumulative_returns: pd.Series) -> float:
+    """Maximum peak-to-trough decline."""
+    rolling_peak = cumulative_returns.expanding().max()
+    drawdown = cumulative_returns / rolling_peak - 1
+    return float(drawdown.min())
+
+
+def cagr(cumulative_returns: pd.Series) -> float:
+    """Compound annual growth rate over the full series length."""
+    n_years = len(cumulative_returns) / 252
+    if n_years == 0:
+        return 0.0
+    final = cumulative_returns.dropna().iloc[-1]
+    return float(final ** (1 / n_years) - 1)
+
+
+def drawdown_series(cumulative_returns: pd.Series) -> pd.Series:
+    """Full drawdown time series (0 to -1 range)."""
+    rolling_peak = cumulative_returns.expanding().max()
+    return cumulative_returns / rolling_peak - 1

@@ -52,3 +52,47 @@ def drawdown_series(cumulative_returns: pd.Series) -> pd.Series:
     """Full drawdown time series (0 to -1 range)."""
     rolling_peak = cumulative_returns.expanding().max()
     return cumulative_returns / rolling_peak - 1
+
+
+def compute_metrics(bt: pd.DataFrame) -> dict:
+    """Compute strategy vs buy-and-hold comparison metrics."""
+    mkt_ret = bt["market_return"].dropna()
+    strat_ret = bt["strategy_return"].dropna()
+    mkt_cum = bt["market_cumret"].dropna()
+    strat_cum = bt["strategy_cumret"].dropna()
+
+    n_signals = int(bt["signal"].sum())
+    n_days = len(bt)
+    actual_crashes = (bt["market_return"] < -0.02).astype(int)
+    signal_precision = float((bt["signal"] & actual_crashes).sum() / n_signals) if n_signals > 0 else 0.0
+
+    mkt_cagr = cagr(mkt_cum)
+    strat_cagr = cagr(strat_cum)
+
+    return {
+        "Market CAGR": mkt_cagr,
+        "Strategy CAGR": strat_cagr,
+        "CAGR Improvement": strat_cagr - mkt_cagr,
+        "Market Sharpe": sharpe_ratio(mkt_ret),
+        "Strategy Sharpe": sharpe_ratio(strat_ret),
+        "Market Max Drawdown": max_drawdown(mkt_cum),
+        "Strategy Max Drawdown": max_drawdown(strat_cum),
+        "Days in Cash (Signals)": n_signals,
+        "% Days in Cash": n_signals / n_days,
+        "Signal Precision": signal_precision,
+        "Total Trading Days": n_days,
+    }
+
+
+def format_metrics(metrics: dict) -> pd.DataFrame:
+    """Human-readable single-column metrics table."""
+    fmt = {
+        "Market CAGR": "{:.1%}", "Strategy CAGR": "{:.1%}",
+        "CAGR Improvement": "{:+.1%}",
+        "Market Sharpe": "{:.2f}", "Strategy Sharpe": "{:.2f}",
+        "Market Max Drawdown": "{:.1%}", "Strategy Max Drawdown": "{:.1%}",
+        "Days in Cash (Signals)": "{:,.0f}", "% Days in Cash": "{:.1%}",
+        "Signal Precision": "{:.1%}", "Total Trading Days": "{:,.0f}",
+    }
+    rows = [{"Metric": k, "Value": fmt.get(k, "{}").format(v)} for k, v in metrics.items()]
+    return pd.DataFrame(rows).set_index("Metric")

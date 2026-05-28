@@ -10,7 +10,13 @@ from sklearn.metrics import roc_auc_score, average_precision_score, f1_score, pr
 from imblearn.over_sampling import SMOTE
 from imblearn.pipeline import Pipeline as ImbPipeline
 
+import joblib
+from pathlib import Path
+
 from src.data.features import get_feature_cols
+
+MODELS_DIR = Path(__file__).parent.parent.parent / "models"
+ARTIFACT_PATH = MODELS_DIR / "crash_detector.joblib"
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -109,3 +115,26 @@ def cross_validate_models(df: pd.DataFrame) -> pd.DataFrame:
     })
 
     return pd.DataFrame(records).set_index("model")
+
+
+def train_final_model(df: pd.DataFrame, model_type: str = "xgboost") -> dict:
+    """Train chosen model on full dataset and save as a joblib artifact."""
+    MODELS_DIR.mkdir(exist_ok=True)
+    feature_cols = get_feature_cols(df)
+    X = df[feature_cols].values
+    y = df["crash"].values
+
+    smote = SMOTE(random_state=SMOTE_RANDOM_STATE)
+    X_res, y_res = smote.fit_resample(X, y)
+
+    model = XGBClassifier(
+        n_estimators=300, max_depth=4, learning_rate=0.05,
+        subsample=0.8, colsample_bytree=0.8,
+        eval_metric="logloss", random_state=42, verbosity=0,
+    )
+    model.fit(X_res, y_res)
+
+    artifact = {"model": model, "feature_cols": feature_cols, "threshold": THRESHOLD, "model_type": model_type}
+    joblib.dump(artifact, ARTIFACT_PATH)
+    print(f"Saved model artifact → {ARTIFACT_PATH}")
+    return artifact

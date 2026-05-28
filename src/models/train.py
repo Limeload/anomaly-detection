@@ -4,6 +4,7 @@ import pandas as pd
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import IsolationForest
 from xgboost import XGBClassifier
 from sklearn.metrics import roc_auc_score, average_precision_score, f1_score, precision_score, recall_score
 from imblearn.over_sampling import SMOTE
@@ -81,5 +82,30 @@ def cross_validate_models(df: pd.DataFrame) -> pd.DataFrame:
             "precision_mean": np.mean(agg["precision"]),
             "recall_mean": np.mean(agg["recall"]),
         })
+
+    # --- Isolation Forest (unsupervised) ---
+    iso_aucs = []
+    crash_rate = y.mean()
+    for train_idx, val_idx in tscv.split(X):
+        X_tr, X_val = X[train_idx], X[val_idx]
+        y_val = y[val_idx]
+        iso = IsolationForest(
+            contamination=float(np.clip(crash_rate, 0.01, 0.49)),
+            n_estimators=200,
+            random_state=42,
+        )
+        iso.fit(X_tr)
+        scores = -iso.score_samples(X_val)
+        iso_aucs.append(roc_auc_score(y_val, scores))
+
+    records.append({
+        "model": "isolation_forest",
+        "roc_auc_mean": np.mean(iso_aucs),
+        "roc_auc_std": np.std(iso_aucs),
+        "avg_precision_mean": None,
+        "f1_mean": None,
+        "precision_mean": None,
+        "recall_mean": None,
+    })
 
     return pd.DataFrame(records).set_index("model")
